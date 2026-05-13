@@ -1,0 +1,10 @@
+{
+    "name": "endweave",
+    "description": "Bedrock multi-version protocol translator (1.21.120 – 1.26.20) for LeviLamina",
+    "version": "0.3.0",
+    "type": "native",
+    "entry": "endweave.dll",
+    "author": "endweave contributors",
+    "license": "LGPL-3.0",
+    "dependencies": [{ "name": "LeviLamina", "version": ">=0.13.0" }]
+}
