@@ -1,0 +1,146 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, master, dev ]
+    tags:     [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: 'Build mode'
+        required: true
+        default: 'release'
+        type: choice
+        options: [ release, releasedbg, debug ]
+
+env:
+  MOD_NAME: endweave
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # ── 1. Checkout ───────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. xmake ──────────────────────────────────────────────
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+
+      # ── 3. Cache packages (levilamina + levibuildscript) ─────
+      - name: Cache xmake packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/.xmake
+            ${{ runner.temp }}/.xmake
+          key: xmake-${{ runner.os }}-${{ hashFiles('xmake.lua') }}
+          restore-keys: xmake-${{ runner.os }}-
+
+      # ── 4. MSVC x64 ───────────────────────────────────────────
+      - name: Setup MSVC x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # ── 5. Resolve build mode ─────────────────────────────────
+      - name: Resolve build mode
+        id: mode
+        shell: bash
+        run: |
+          if   [ -n "${{ github.event.inputs.build_mode }}" ]; then
+            echo "mode=${{ github.event.inputs.build_mode }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "mode=releasedbg" >> $GITHUB_OUTPUT  # PDB for crash analysis
+          else
+            echo "mode=release" >> $GITHUB_OUTPUT
+          fi
+
+      # ── 6. Configure ──────────────────────────────────────────
+      - name: Configure
+        shell: pwsh
+        run: |
+          xmake f `
+            --yes `
+            -p windows `
+            -a x64 `
+            -m ${{ steps.mode.outputs.mode }}
+
+      # ── 7. Build ──────────────────────────────────────────────
+      - name: Build
+        shell: pwsh
+        run: |
+          xmake build -v ${{ env.MOD_NAME }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ── 8. Collect artifacts ──────────────────────────────────
+      - name: Collect artifacts
+        id: collect
+        shell: pwsh
+        run: |
+          $mode   = "${{ steps.mode.outputs.mode }}"
+          $outDir = "artifact\plugins\${{ env.MOD_NAME }}"
+          New-Item -ItemType Directory -Force $outDir | Out-Null
+
+          $buildDir = "build\windows\x64\$mode"
+          $dll = "$buildDir\${{ env.MOD_NAME }}.dll"
+          $pdb = "$buildDir\${{ env.MOD_NAME }}.pdb"
+
+          if (-not (Test-Path $dll)) {
+            Write-Error "DLL not found at: $dll"
+            exit 1
+          }
+
+          Copy-Item $dll       "$outDir\${{ env.MOD_NAME }}.dll"
+          Copy-Item "mod.json" "$outDir\mod.json"
+
+          $hasPdb = Test-Path $pdb
+          if ($hasPdb) {
+            Copy-Item $pdb "$outDir\${{ env.MOD_NAME }}.pdb"
+            Write-Host "PDB included."
+          }
+
+          $size = [math]::Round((Get-Item $dll).Length / 1KB, 1)
+          Write-Host "DLL size: $size KiB"
+
+          Write-Host "`nArtifact layout:"
+          Get-ChildItem -Recurse artifact | Format-Table Name, Length -AutoSize
+
+      # ── 9. Upload artifact ────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MOD_NAME }}-${{ steps.mode.outputs.mode }}-${{ github.sha }}
+          path: artifact/
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── 10. Create GitHub Release (tag push only) ─────────────
+      - name: Package for release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "artifact\*" `
+            -DestinationPath "${{ env.MOD_NAME }}-${{ github.ref_name }}.zip"
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.MOD_NAME }} ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: ${{ env.MOD_NAME }}-${{ github.ref_name }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
